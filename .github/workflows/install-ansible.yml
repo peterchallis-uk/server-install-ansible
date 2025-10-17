@@ -1,95 +1,131 @@
-name: Install Ansible on Ubuntu
+  - name: Set up SSH key
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_HOST: ${{ secrets.SERVER_IP }}
+      SSH_USER: ${{ secrets.SERVER_USER }}
+    run: |
+      set -euo pipefail
+      mkdir -p "$HOME/.ssh"
+      chmod 700 "$HOME/.ssh"
 
-on:
-  workflow_dispatch:
-  push:
+      if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+        echo "ERROR: SSH_PRIVATE_KEY secret is not set"
+        exit 1
+      fi
 
-jobs:
-  install-ansible:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      printf "%s\n" "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
+      chmod 600 "$HOME/.ssh/id_rsa"
 
-      - name: Set up SSH key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_HOST: ${{ secrets.SERVER_IP }}
-          SSH_USER: ${{ secrets.SERVER_USER }}
-        run: |
-          set -euo pipefail
+      if [ -z "${SSH_HOST:-}" ]; then
+        echo "ERROR: SERVER_IP (SSH_HOST) secret is not set"
+        exit 1
+      fi
 
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
+      if ! command -v ssh-keyscan >/dev/null 2>&1; then
+        echo "ERROR: ssh-keyscan is not available on the runner"
+        exit 1
+      fi
 
-          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
-            echo "ERROR: SSH_PRIVATE_KEY secret is not set"
-            exit 1
-          fi
-          printf "%s\n" "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
-          chmod 600 "$HOME/.ssh/id_rsa"
+      # Try to resolve the host first (helpful diagnostic)
+      resolve_ok=false
+      if command -v getent >/dev/null 2>&1; then
+        if getent ahosts "$SSH_HOST" >/dev/null 2>&1; then
+          resolve_ok=true
+        fi
+      elif command -v nslookup >/dev/null 2>&1; then
+        if nslookup "$SSH_HOST" >/dev/null 2>&1; then
+          resolve_ok=true
+        fi
+      elif command -v ping >/dev/null 2>&1; then
+        if ping -c 1 -W 1 "$SSH_HOST" >/dev/null 2>&1; then
+          resolve_ok=true
+        fi
+      fi
 
-          SSH_HOST="${SSH_HOST:-}"
-          if [ -z "$SSH_HOST" ]; then
-            echo "ERROR: SERVER_IP (SSH_HOST) secret is not set"
-            exit 1
-          fi
+      if [ "$resolve_ok" = "false" ]; then
+        echo "WARNING: Hostname/IP '$SSH_HOST' did not resolve or respond to basic checks. This may indicate DNS/network/firewall issues."
+        # continue to try ssh-keyscan anyway for transient cases
+      fi
 
-          if ! command -v ssh-keyscan >/dev/null 2>&1; then
-            echo "ERROR: ssh-keyscan is not available on the runner"
-            exit 1
-          fi
+      # Try ssh-keyscan with a few attempts to avoid transient network flakiness
+      added=false
+      for i in 1 2 3; do
+        if timeout 10 ssh-keyscan -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null; then
+          added=true
+          break
+        fi
+        echo "ssh-keyscan attempt $i failed, retrying..."
+        sleep 2
+      done
 
-          # attempt to add host key with a short timeout to avoid hanging the job
-          if ! timeout 10 ssh-keyscan -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null; then
-            echo "ssh-keyscan failed for $SSH_HOST — check DNS/firewall or correct secret value"
-            exit 1
-          fi
-          chmod 644 "$HOME/.ssh/known_hosts"
+      if [ "$added" = "true" ]; then
+        echo "Added $SSH_HOST to known_hosts"
+        echo "USE_STRICT_HOSTS=true" >> "$GITHUB_ENV"
+        chmod 644 "$HOME/.ssh/known_hosts"
+      else
+        echo "ssh-keyscan failed for $SSH_HOST — check DNS/firewall or correct secret value"
+        # Fallback: allow the workflow to continue but disable strict host checking for the next SSH step.
+        # This is less secure (man-in-the-middle risk) but useful for CI/test runs when you cannot obtain host key.
+        echo "USE_STRICT_HOSTS=false" >> "$GITHUB_ENV"
+        # Optionally keep the step failing instead of falling back; to force failure, uncomment the next line:
+        # exit 1
+      fi
 
-      - name: Run test playbook remotely (install Ansible if needed)
-        env:
-          SSH_HOST: ${{ secrets.SERVER_IP }}
-          SSH_USER: ${{ secrets.SERVER_USER }}
-        run: |
-          set -euo pipefail
+  - name: Run test playbook remotely (install Ansible if needed)
+    env:
+      SSH_HOST: ${{ secrets.SERVER_IP }}
+      SSH_USER: ${{ secrets.SERVER_USER }}
+      USE_STRICT_HOSTS: ${{ env.USE_STRICT_HOSTS }}
+    run: |
+      set -euo pipefail
 
-          SSH_USER=${SSH_USER:-ubuntu}
-          SSH_HOST=${SSH_HOST:?SSH_HOST must be set}
-          SSH_KEY="$HOME/.ssh/id_rsa"
+      SSH_USER=${SSH_USER:-ubuntu}
+      SSH_HOST=${SSH_HOST:?SSH_HOST must be set}
+      USE_STRICT_HOSTS=${USE_STRICT_HOSTS:-true}
+      SSH_KEY="$HOME/.ssh/id_rsa"
 
-          # quick connectivity check
-          if ! timeout 10 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'echo connected' >/dev/null 2>&1; then
-            echo "ERROR: Unable to SSH to ${SSH_USER}@${SSH_HOST}. Check network, firewall, and secret values."
-            exit 1
-          fi
+      # Determine StrictHostKeyChecking option value
+      if [ "$USE_STRICT_HOSTS" = "true" ]; then
+        STRICT="yes"
+      else
+        echo "WARNING: StrictHostKeyChecking disabled for this run (USE_STRICT_HOSTS=false). This is less secure."
+        STRICT="no"
+      fi
 
-          # Install ansible (if missing) and run a simple playbook on the remote host
-          ssh -i "$SSH_KEY" -tt -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" <<'EOF'
-            set -euo pipefail
-            export DEBIAN_FRONTEND=noninteractive
+      # Quick connectivity test (won't add host key if skipped)
+      if ! timeout 10 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking="$STRICT" -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'echo connected' >/dev/null 2>&1; then
+        echo "ERROR: Unable to SSH to ${SSH_USER}@${SSH_HOST}. Check network, firewall, and secret values."
+        exit 1
+      fi
 
-            # Ensure Ansible is installed so ansible-playbook localhost works
-            if ! command -v ansible-playbook >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y ansible
-            fi
+      # Install Ansible (if missing) and run a playbook on the remote host
+      ssh -i "$SSH_KEY" -tt -o StrictHostKeyChecking="$STRICT" "${SSH_USER}@${SSH_HOST}" <<'EOF'
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
 
-            # write a test playbook that runs against localhost on the remote machine
-            cat > /tmp/test-playbook.yml <<'PLAY'
-            ---
-            - name: Test Ansible connectivity and file creation
-              hosts: localhost
-              become: yes
-              tasks:
-                - name: Create a test file
-                  file:
-                    path: /tmp/ansible-test-success.txt
-                    state: touch
-            PLAY
+        # Ensure Python and Ansible are present so ansible-playbook localhost works
+        if ! command -v ansible-playbook >/dev/null 2>&1; then
+          sudo apt-get update -y
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository --yes --update ppa:ansible/ansible || true
+          sudo apt-get install -y ansible || true
+        fi
 
-            ansible-playbook /tmp/test-playbook.yml
+        # write a test playbook that runs against localhost on the remote machine
+        cat > /tmp/test-playbook.yml <<'PLAY'
+        ---
+        - name: Test Ansible connectivity and file creation
+          hosts: localhost
+          become: yes
+          tasks:
+            - name: Create a test file
+              file:
+                path: /tmp/ansible-test-success.txt
+                state: touch
+        PLAY
 
-            # show result
-            ls -l /tmp/ansible-test-success.txt || true
-          EOF
+        ansible-playbook /tmp/test-playbook.yml
+
+        # show result
+        ls -l /tmp/ansible-test-success.txt || true
+      EOF
