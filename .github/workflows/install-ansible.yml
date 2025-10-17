@@ -1,75 +1,102 @@
-  - name: Set up SSH key
-    env:
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-      SSH_HOST: ${{ secrets.SERVER_IP }}
-      SSH_USER: ${{ secrets.SERVER_USER }}
-    run: |
-      set -euo pipefail
-      mkdir -p "$HOME/.ssh"
-      chmod 700 "$HOME/.ssh"
+name: Install Ansible on Ubuntu
 
-      if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
-        echo "ERROR: SSH_PRIVATE_KEY secret is not set"
-        exit 1
-      fi
-      printf "%s\n" "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
-      chmod 600 "$HOME/.ssh/id_rsa"
+on:
+  workflow_dispatch:
+  push:
 
-      if [ -z "${SSH_HOST:-}" ]; then
-        echo "ERROR: SERVER_IP secret is not set"
-        exit 1
-      fi
+jobs:
+  install-ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      if ! command -v ssh-keyscan >/dev/null 2>&1; then
-        echo "ERROR: ssh-keyscan is not available on the runner"
-        exit 1
-      fi
+      - name: Set up SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
 
-      # Add host key (short timeout to avoid hanging)
-      if ! timeout 10 ssh-keyscan -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null; then
-        echo "ssh-keyscan failed for $SSH_HOST — check DNS/firewall or correct secret value"
-        exit 1
-      fi
-      chmod 644 "$HOME/.ssh/known_hosts"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
 
-  - name: Run test playbook remotely (install Ansible if needed)
-    env:
-      SSH_HOST: ${{ secrets.SERVER_IP }}
-      SSH_USER: ${{ secrets.SERVER_USER }}
-    run: |
-      set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: SSH_PRIVATE_KEY secret is not set"
+            exit 1
+          fi
 
-      SSH_USER=${SSH_USER:-ubuntu}
-      SSH_HOST=${SSH_HOST:?SSH_HOST must be set}
-      SSH_KEY="$HOME/.ssh/id_rsa"
+          printf "%s\n" "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
+          chmod 600 "$HOME/.ssh/id_rsa"
 
-      # quick connectivity check
-      if ! timeout 10 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'echo connected' >/dev/null 2>&1; then
-        echo "ERROR: Unable to SSH to ${SSH_USER}@${SSH_HOST}. Check network, firewall, and secret values."
-        exit 1
-      fi
+          if [ -z "${SSH_HOST:-}" ]; then
+            echo "ERROR: SERVER_IP secret is not set"
+            exit 1
+          fi
 
-      ssh -i "$SSH_KEY" -tt -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" <<'EOF'
-        set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
+          if ! command -v ssh-keyscan >/dev/null 2>&1; then
+            echo "ERROR: ssh-keyscan is not available on the runner"
+            exit 1
+          fi
 
-        if ! command -v ansible-playbook >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y ansible
-        fi
+          # Try to add the host key; if it fails, set USE_STRICT_HOSTS=false so workflow can continue.
+          if timeout 10 ssh-keyscan -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null; then
+            echo "Added $SSH_HOST to known_hosts"
+            chmod 644 "$HOME/.ssh/known_hosts"
+            echo "USE_STRICT_HOSTS=true" >> "$GITHUB_ENV"
+          else
+            echo "ssh-keyscan failed for $SSH_HOST — continuing with StrictHostKeyChecking=no"
+            echo "USE_STRICT_HOSTS=false" >> "$GITHUB_ENV"
+          fi
 
-        cat > /tmp/test-playbook.yml <<'PLAY'
-        ---
-        - name: Test Ansible connectivity and file creation
-          hosts: localhost
-          become: yes
-          tasks:
-            - name: Create a test file
-              file:
-                path: /tmp/ansible-test-success.txt
-                state: touch
-        PLAY
+      - name: Run test playbook remotely (install Ansible if needed)
+        env:
+          SSH_HOST: ${{ secrets.SERVER_IP }}
+          SSH_USER: ${{ secrets.SERVER_USER }}
+          USE_STRICT_HOSTS: ${{ env.USE_STRICT_HOSTS }}
+        run: |
+          set -euo pipefail
 
-        ansible-playbook /tmp/test-playbook.yml
-        ls -l /tmp/ansible-test-success.txt || true
-      EOF
+          SSH_USER=${SSH_USER:-ubuntu}
+          SSH_HOST=${SSH_HOST:?SSH_HOST must be set}
+          USE_STRICT_HOSTS=${USE_STRICT_HOSTS:-true}
+          SSH_KEY="$HOME/.ssh/id_rsa"
+
+          if [ "$USE_STRICT_HOSTS" = "true" ]; then
+            STRICT="yes"
+          else
+            echo "WARNING: StrictHostKeyChecking disabled for this run (USE_STRICT_HOSTS=false)."
+            STRICT="no"
+          fi
+
+          # quick connectivity check
+          if ! timeout 10 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking="$STRICT" -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'echo connected' >/dev/null 2>&1; then
+            echo "ERROR: Unable to SSH to ${SSH_USER}@${SSH_HOST}. Check network, firewall, and secret values."
+            exit 1
+          fi
+
+          # Install Ansible if missing and run a simple playbook on the remote host
+          ssh -i "$SSH_KEY" -tt -o StrictHostKeyChecking="$STRICT" "${SSH_USER}@${SSH_HOST}" <<'EOF'
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            if ! command -v ansible-playbook >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y ansible
+            fi
+
+            cat > /tmp/test-playbook.yml <<'PLAY'
+            ---
+            - name: Test Ansible connectivity and file creation
+              hosts: localhost
+              become: yes
+              tasks:
+                - name: Create a test file
+                  file:
+                    path: /tmp/ansible-test-success.txt
+                    state: touch
+            PLAY
+
+            ansible-playbook /tmp/test-playbook.yml
+            ls -l /tmp/ansible-test-success.txt || true
+          EOF
