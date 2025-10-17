@@ -1,4 +1,4 @@
-name: Install Ansible on Ubuntu Server
+name: Install Ansible on Ubuntu
 
 on:
   workflow_dispatch: {}
