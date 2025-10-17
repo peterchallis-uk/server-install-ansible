@@ -11,6 +11,5 @@
             echo "      file:" >> test-playbook.yml
             echo "        path: /tmp/ansible-test-success.txt" >> test-playbook.yml
             echo "        state: touch" >> test-playbook.yml
-
             ansible-playbook test-playbook.yml
           EOF
