@@ -1,8 +1,8 @@
 name: Install Ansible on Ubuntu
 
 on:
-  workflow_dispatch: {}
-  push: {}
+  workflow_dispatch:
+  push:
 
 jobs:
   install-ansible:
@@ -23,13 +23,12 @@ jobs:
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> /home/runner/.ssh/known_hosts
 
       - name: Install Ansible remotely
-        shell: bash
         run: |
-          ssh -tt ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
+          ssh -i /home/runner/.ssh/id_rsa -tt ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
             set -e
             sudo apt update
             sudo apt install -y software-properties-common
             sudo add-apt-repository --yes --update ppa:ansible/ansible
             sudo apt install -y ansible
             ansible --version
-EOF
+          EOF
