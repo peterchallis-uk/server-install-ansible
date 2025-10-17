@@ -12,25 +12,84 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Set up SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SERVER_IP }}
+          SSH_USER: ${{ secrets.SERVER_USER }}
         run: |
-          mkdir -p /home/runner/.ssh
-          chmod 700 /home/runner/.ssh
-          printf "%s" "${{ secrets.SSH_PRIVATE_KEY }}" > /home/runner/.ssh/id_rsa
-          chmod 600 /home/runner/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> /home/runner/.ssh/known_hosts
+          set -euo pipefail
 
-      - name: Run test playbook remotely
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          if [ -z "${SSH_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: SSH_PRIVATE_KEY secret is not set"
+            exit 1
+          fi
+          printf "%s\n" "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
+          chmod 600 "$HOME/.ssh/id_rsa"
+
+          SSH_HOST="${SSH_HOST:-}"
+          if [ -z "$SSH_HOST" ]; then
+            echo "ERROR: SERVER_IP (SSH_HOST) secret is not set"
+            exit 1
+          fi
+
+          if ! command -v ssh-keyscan >/dev/null 2>&1; then
+            echo "ERROR: ssh-keyscan is not available on the runner"
+            exit 1
+          fi
+
+          # attempt to add host key with a short timeout to avoid hanging the job
+          if ! timeout 10 ssh-keyscan -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null; then
+            echo "ssh-keyscan failed for $SSH_HOST — check DNS/firewall or correct secret value"
+            exit 1
+          fi
+          chmod 644 "$HOME/.ssh/known_hosts"
+
+      - name: Run test playbook remotely (install Ansible if needed)
+        env:
+          SSH_HOST: ${{ secrets.SERVER_IP }}
+          SSH_USER: ${{ secrets.SERVER_USER }}
         run: |
-          ssh -i /home/runner/.ssh/id_rsa -tt ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
-            set -e
-            echo "---" > test-playbook.yml
-            echo "- name: Test Ansible connectivity and file creation" >> test-playbook.yml
-            echo "  hosts: localhost" >> test-playbook.yml
-            echo "  become: yes" >> test-playbook.yml
-            echo "  tasks:" >> test-playbook.yml
-            echo "    - name: Create a test file" >> test-playbook.yml
-            echo "      file:" >> test-playbook.yml
-            echo "        path: /tmp/ansible-test-success.txt" >> test-playbook.yml
-            echo "        state: touch" >> test-playbook.yml
-            ansible-playbook test-playbook.yml
+          set -euo pipefail
+
+          SSH_USER=${SSH_USER:-ubuntu}
+          SSH_HOST=${SSH_HOST:?SSH_HOST must be set}
+          SSH_KEY="$HOME/.ssh/id_rsa"
+
+          # quick connectivity check
+          if ! timeout 10 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'echo connected' >/dev/null 2>&1; then
+            echo "ERROR: Unable to SSH to ${SSH_USER}@${SSH_HOST}. Check network, firewall, and secret values."
+            exit 1
+          fi
+
+          # Install ansible (if missing) and run a simple playbook on the remote host
+          ssh -i "$SSH_KEY" -tt -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" <<'EOF'
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            # Ensure Ansible is installed so ansible-playbook localhost works
+            if ! command -v ansible-playbook >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y ansible
+            fi
+
+            # write a test playbook that runs against localhost on the remote machine
+            cat > /tmp/test-playbook.yml <<'PLAY'
+            ---
+            - name: Test Ansible connectivity and file creation
+              hosts: localhost
+              become: yes
+              tasks:
+                - name: Create a test file
+                  file:
+                    path: /tmp/ansible-test-success.txt
+                    state: touch
+            PLAY
+
+            ansible-playbook /tmp/test-playbook.yml
+
+            # show result
+            ls -l /tmp/ansible-test-success.txt || true
           EOF
