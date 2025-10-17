@@ -11,6 +11,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Test SSH setup
+        shell: bash
+        run: |
+          set -x
+          mkdir -p ~/.ssh
+          echo "test" > ~/.ssh/testfile
+          ls -la ~/.ssh
+
       - name: Set up SSH key
         run: |
           mkdir -p ~/.ssh
