@@ -1,0 +1,16 @@
+      - name: Run test playbook remotely
+        run: |
+          ssh -i /home/runner/.ssh/id_rsa -tt ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
+            set -e
+            echo "---" > test-playbook.yml
+            echo "- name: Test Ansible connectivity and file creation" >> test-playbook.yml
+            echo "  hosts: localhost" >> test-playbook.yml
+            echo "  become: yes" >> test-playbook.yml
+            echo "  tasks:" >> test-playbook.yml
+            echo "    - name: Create a test file" >> test-playbook.yml
+            echo "      file:" >> test-playbook.yml
+            echo "        path: /tmp/ansible-test-success.txt" >> test-playbook.yml
+            echo "        state: touch" >> test-playbook.yml
+
+            ansible-playbook test-playbook.yml
+          EOF
