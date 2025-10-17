@@ -11,6 +11,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Show HOME path
+        run: echo "HOME is: $HOME"
+
       - name: Test SSH setup
         shell: bash
         run: |
@@ -21,11 +24,12 @@ jobs:
 
       - name: Set up SSH key
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf "%s" "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          mkdir -p /home/runner/.ssh
+          chmod 700 /home/runner/.ssh
+          printf "%s" "${{ secrets.SSH_PRIVATE_KEY }}" > /home/runner/.ssh/id_rsa
+          chmod 600 /home/runner/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> /home/runner/.ssh/known_hosts
+
 
       - name: Install Ansible remotely
         shell: bash
