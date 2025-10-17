@@ -14,14 +14,16 @@ jobs:
       - name: Set up SSH key
         run: |
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           printf "%s" "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
-      
-      
+
       - name: Install Ansible remotely
+        shell: bash
         run: |
           ssh -tt ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
+            set -e
             sudo apt update
             sudo apt install -y software-properties-common
             sudo add-apt-repository --yes --update ppa:ansible/ansible
