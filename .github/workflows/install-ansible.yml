@@ -1,6 +1,5 @@
 name: Test SSH Setup
 
-
 on:
   workflow_dispatch:
 
